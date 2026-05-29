@@ -366,6 +366,20 @@ func (sp *ServerPool) biTransport(ctx *serverPoolContext, proxyAsClientStream gr
 			ctx.resp.SetTrailer(grpcprot.NewTrailer(proxyAsClientStream.Trailer()))
 			// c2sErr will contain RPC error from client code. If not io.EOF return the RPC error as server stream error.
 			if s2cErr != io.EOF {
+				// A well-formed gRPC status error means the backend communicated an
+				// application-level result (e.g. NOT_FOUND, INVALID_ARGUMENT) over a
+				// healthy connection. Marking the pool entry as resultServerError in
+				// that case degrades a perfectly usable backend connection and causes
+				// subsequent calls to stall waiting on pool.borrow(). Only return
+				// resultServerError for transport-level failures (non-gRPC errors)
+				// where the connection itself is broken.
+				if st, isGRPCStatus := status.FromError(s2cErr); isGRPCStatus {
+					// Preserve the backend's gRPC status so the caller receives the
+					// correct code (e.g. NOT_FOUND, INVALID_ARGUMENT). The connection
+					// itself is healthy so we still return nil to avoid pool degradation.
+					ctx.resp.SetStatus(st)
+					return nil
+				}
 				return serverPoolError{status.Convert(s2cErr), resultServerError}
 			}
 			return nil
